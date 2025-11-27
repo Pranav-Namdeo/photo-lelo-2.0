@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Capture System</title>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            max-width: 600px;
+            width: 100%;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        
+        .input-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: bold;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .camera-container {
+            position: relative;
+            margin: 20px 0;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #000;
+        }
+        
+        #video {
+            width: 100%;
+            display: block;
+        }
+        
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        button {
+            flex: 1;
+            padding: 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        #saveBtn {
+            background: #667eea;
+            color: white;
+        }
+        
+        #saveBtn:hover:not(:disabled) {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            text-align: center;
+            padding: 10px;
+            margin-top: 15px;
+            border-radius: 8px;
+            font-weight: bold;
+            display: none;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            display: block;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            display: block;
+        }
+        
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Face Capture System</h1>
+        
+        <div class="input-group">
+            <label for="enrollmentNumber">Enrollment Number:</label>
+            <input type="text" id="enrollmentNumber" placeholder="Enter enrollment number" required>
+        </div>
+        
+        <div class="camera-container">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="canvas"></canvas>
+        </div>
+        
+        <div class="button-group">
+            <button id="saveBtn" disabled>Save Image</button>
+        </div>
+        
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const enrollmentInput = document.getElementById('enrollmentNumber');
+        const saveBtn = document.getElementById('saveBtn');
+        const statusDiv = document.getElementById('status');
+        
+        let modelsLoaded = false;
+        let faceDetected = false;
+        let stream = null;
+        let livenessScore = 0;
+        let frameCount = 0;
+        let textureScores = [];
+        const REQUIRED_FRAMES = 10; // Fast detection
+
+        // Load face-api models
+        async function loadModels() {
+            try {
+                showStatus('Loading face detection models...', 'info');
+                
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri('./models'),
+                    faceapi.nets.faceLandmark68Net.loadFromUri('./models'),
+                    faceapi.nets.faceRecognitionNet.loadFromUri('./models')
+                ]);
+                
+                modelsLoaded = true;
+                showStatus('Models loaded successfully!', 'success');
+                setTimeout(() => hideStatus(), 2000);
+            } catch (error) {
+                showStatus('Error loading models: ' + error.message, 'error');
+                console.error('Model loading error:', error);
+            }
+        }
+
+        // Start camera
+        async function startCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 640, height: 480 } 
+                });
+                video.srcObject = stream;
+                
+                video.addEventListener('loadedmetadata', () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    detectFace();
+                });
+            } catch (error) {
+                showStatus('Error accessing camera: ' + error.message, 'error');
+                console.error('Camera error:', error);
+            }
+        }
+
+        // Simple and fast texture-based liveness detection
+        function checkLiveness(detection) {
+            const box = detection.detection.box;
+            
+            // Extract face region from video
+            const faceCanvas = document.createElement('canvas');
+            const faceCtx = faceCanvas.getContext('2d');
+            
+            const padding = 20;
+            const x = Math.max(0, box.x - padding);
+            const y = Math.max(0, box.y - padding);
+            const width = Math.min(video.videoWidth - x, box.width + padding * 2);
+            const height = Math.min(video.videoHeight - y, box.height + padding * 2);
+            
+            faceCanvas.width = width;
+            faceCanvas.height = height;
+            faceCtx.drawImage(video, x, y, width, height, 0, 0, width, height);
+            
+            // Get image data
+            const imageData = faceCtx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+            
+            // Calculate texture complexity
+            // Real faces have high texture variation (skin pores, wrinkles, shadows)
+            // Photos on screens have lower variation and more uniform lighting
+            let edgeCount = 0;
+            let totalPixels = 0;
+            let brightnessVariance = 0;
+            let brightnessValues = [];
+            
+            // Sample every 4th pixel for performance
+            for (let i = 0; i < data.length; i += 16) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                const brightness = (r + g + b) / 3;
+                brightnessValues.push(brightness);
+                
+                // Check for edges (texture)
+                if (i > width * 4) {
+                    const prevBrightness = (data[i - width * 4] + data[i - width * 4 + 1] + data[i - width * 4 + 2]) / 3;
+                    if (Math.abs(brightness - prevBrightness) > 15) {
+                        edgeCount++;
+                    }
+                }
+                totalPixels++;
+            }
+            
+            // Calculate brightness variance
+            const avgBrightness = brightnessValues.reduce((a, b) => a + b, 0) / brightnessValues.length;
+            brightnessVariance = brightnessValues.reduce((sum, val) => 
+                sum + Math.pow(val - avgBrightness, 2), 0) / brightnessValues.length;
+            
+            const edgeRatio = edgeCount / totalPixels;
+            
+            // Real faces: high edge ratio (>0.15) and high brightness variance (>400)
+            // Photos: lower values due to screen uniformity and compression
+            const textureScore = (edgeRatio * 100) + (Math.sqrt(brightnessVariance) / 2);
+            
+            textureScores.push(textureScore);
+            if (textureScores.length > REQUIRED_FRAMES) {
+                textureScores.shift();
+            }
+            
+            frameCount++;
+            
+            // Quick approval for real faces
+            if (textureScores.length >= REQUIRED_FRAMES) {
+                const avgTextureScore = textureScores.reduce((a, b) => a + b, 0) / textureScores.length;
+                
+                // Real human faces typically score > 25
+                // Photos on screens typically score < 20
+                if (avgTextureScore > 22) {
+                    livenessScore = Math.min(100, livenessScore + 15);
+                } else {
+                    livenessScore = Math.max(0, livenessScore - 5);
+                }
+            } else {
+                // Build up score quickly during initial frames
+                livenessScore = Math.min(100, (frameCount / REQUIRED_FRAMES) * 50);
+            }
+            
+            return livenessScore >= 50;
+        }
+
+        // Detect face in real-time
+        async function detectFace() {
+            if (!modelsLoaded) return;
+            
+            const detection = await faceapi.detectSingleFace(
+                video, 
+                new faceapi.TinyFaceDetectorOptions()
+            ).withFaceLandmarks().withFaceDescriptor();
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (detection) {
+                const isLive = checkLiveness(detection);
+                
+                // Draw detection box
+                const box = detection.detection.box;
+                
+                // Color based on liveness
+                if (isLive) {
+                    ctx.strokeStyle = '#00ff00'; // Green for live
+                    faceDetected = true;
+                } else {
+                    ctx.strokeStyle = '#ffaa00'; // Orange for checking
+                    faceDetected = false;
+                }
+                
+                ctx.lineWidth = 3;
+                ctx.strokeRect(box.x, box.y, box.width, box.height);
+                
+                // Draw landmarks
+                ctx.fillStyle = isLive ? '#00ff00' : '#ffaa00';
+                const landmarks = detection.landmarks.positions;
+                landmarks.forEach(point => {
+                    ctx.beginPath();
+                    ctx.arc(point.x, point.y, 2, 0, 2 * Math.PI);
+                    ctx.fill();
+                });
+                
+                // Display liveness score
+                ctx.fillStyle = isLive ? '#00ff00' : '#ffaa00';
+                ctx.font = 'bold 16px Arial';
+                ctx.fillText(`Liveness: ${Math.round(livenessScore)}%`, box.x, box.y - 10);
+                
+                // Show instruction if not live
+                if (!isLive) {
+                    ctx.fillStyle = '#ffaa00';
+                    ctx.font = 'bold 18px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Analyzing face texture...', canvas.width / 2, 30);
+                    ctx.textAlign = 'left';
+                }
+                
+                updateSaveButton();
+            } else {
+                faceDetected = false;
+                livenessScore = Math.max(0, livenessScore - 10);
+                frameCount = 0;
+                textureScores = [];
+                updateSaveButton();
+            }
+            
+            requestAnimationFrame(detectFace);
+        }
+
+        // Update save button state
+        function updateSaveButton() {
+            const enrollmentNumber = enrollmentInput.value.trim();
+            const isLive = livenessScore >= 50;
+            saveBtn.disabled = !(faceDetected && enrollmentNumber && modelsLoaded && isLive);
+            
+            // Update button text based on liveness
+            if (!isLive && modelsLoaded) {
+                saveBtn.textContent = 'Checking Liveness...';
+            } else if (isLive && faceDetected) {
+                saveBtn.textContent = 'Save Image';
+            } else {
+                saveBtn.textContent = 'Save Image';
+            }
+        }
+
+        // Save image
+        async function saveImage() {
+            const enrollmentNumber = enrollmentInput.value.trim();
+            
+            if (!enrollmentNumber) {
+                showStatus('Please enter an enrollment number', 'error');
+                return;
+            }
+            
+            if (!faceDetected) {
+                showStatus('No face detected. Please position your face in the camera.', 'error');
+                return;
+            }
+            
+            if (livenessScore < 50) {
+                showStatus('Liveness check failed. Please ensure good lighting and try again.', 'error');
+                return;
+            }
+            
+            try {
+                // Create a temporary canvas to capture the video frame
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = video.videoWidth;
+                tempCanvas.height = video.videoHeight;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(video, 0, 0);
+                
+                // Convert to blob
+                tempCanvas.toBlob(async (blob) => {
+                    const formData = new FormData();
+                    formData.append('image', blob, `${enrollmentNumber}.png`);
+                    formData.append('enrollmentNumber', enrollmentNumber);
+                    
+                    try {
+                        const response = await fetch('/save-image', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        if (response.ok) {
+                            showStatus(`Image saved successfully as ${enrollmentNumber}.png`, 'success');
+                            enrollmentInput.value = '';
+                            updateSaveButton();
+                        } else {
+                            showStatus('Error saving image: ' + response.statusText, 'error');
+                        }
+                    } catch (error) {
+                        showStatus('Error saving image: ' + error.message, 'error');
+                        console.error('Save error:', error);
+                    }
+                }, 'image/png');
+                
+            } catch (error) {
+                showStatus('Error capturing image: ' + error.message, 'error');
+                console.error('Capture error:', error);
+            }
+        }
+
+        // Show status message
+        function showStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+
+        // Hide status message
+        function hideStatus() {
+            statusDiv.className = 'status';
+        }
+
+        // Event listeners
+        enrollmentInput.addEventListener('input', updateSaveButton);
+        saveBtn.addEventListener('click', saveImage);
+
+        // Initialize when page loads
+        window.addEventListener('load', () => {
+            if (typeof faceapi === 'undefined') {
+                showStatus('Error: face-api.js failed to load', 'error');
+                return;
+            }
+            loadModels();
+            startCamera();
+        });
+    </script>
+</body>
+</html>
