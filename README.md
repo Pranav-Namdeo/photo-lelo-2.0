@@ -16,6 +16,10 @@ npm start
 
 3. Open your browser and go to:
 ```
+http://192.168.100.174:3000/imagecapture.html
+```
+Or from the same computer:
+```
 http://localhost:3000/imagecapture.html
 ```
 

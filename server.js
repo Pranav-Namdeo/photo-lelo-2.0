@@ -46,7 +46,9 @@ app.post('/save-image', upload.single('image'), (req, res) => {
     });
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-    console.log(`Open http://localhost:${PORT}/imagecapture.html in your browser`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running at:`);
+    console.log(`  Local:   http://localhost:${PORT}`);
+    console.log(`  Network: http://192.168.100.174:${PORT}`);
+    console.log(`\nOpen http://192.168.100.174:${PORT}/imagecapture.html in your browser`);
 });
