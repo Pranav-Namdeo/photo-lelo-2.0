@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import axios from 'axios';
 import {API_BASE_URL} from '../config';
@@ -18,6 +19,28 @@ export default function LoginScreen({navigation}) {
   const [enrollmentNumber, setEnrollmentNumber] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const requestStoragePermission = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+          {
+            title: 'Storage Permission',
+            message: 'Photo Lelo needs storage access to save your photo for offline verification',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      } catch (err) {
+        console.warn(err);
+        return true; // Continue anyway, internal storage doesn't need permission
+      }
+    }
+    return true;
+  };
 
   const handleLogin = async () => {
     if (!enrollmentNumber.trim() || !password.trim()) {
@@ -44,20 +67,52 @@ export default function LoginScreen({navigation}) {
       }
 
       if (password === user.password) {
+        // Request storage permission
+        const hasPermission = await requestStoragePermission();
+        console.log('Storage permission granted:', hasPermission);
+        
+        // Save user data first
+        await saveUserData(user);
+        
         // Download and save photo for offline verification
         try {
-          const photoUrl = `${API_BASE_URL}/Image save/${user.filename}`;
-          console.log('Downloading photo from:', photoUrl);
-          await downloadAndSavePhoto(photoUrl, user.username);
-          await saveUserData(user);
-          console.log('Photo saved successfully');
+          // Encode the URL properly to handle spaces
+          const photoUrl = `${API_BASE_URL}/Image%20save/${encodeURIComponent(user.filename)}`;
+          console.log('=== LOGIN: Starting photo download ===');
+          console.log('Photo URL:', photoUrl);
+          console.log('Username:', user.username);
+          console.log('Filename:', user.filename);
+          
+          const savedPath = await downloadAndSavePhoto(photoUrl, user.username);
+          console.log('=== LOGIN: Photo saved successfully ===');
+          console.log('Saved path:', savedPath);
+          
+          setLoading(false);
+          navigation.replace('Home', {user});
         } catch (photoError) {
-          console.error('Error saving photo:', photoError);
-          // Continue even if photo download fails
+          console.error('=== LOGIN: Photo download failed ===');
+          console.error('Error:', photoError);
+          console.error('Error message:', photoError.message);
+          console.error('Error stack:', photoError.stack);
+          
+          setLoading(false);
+          
+          // Show detailed error to user
+          Alert.alert(
+            'Photo Download Failed',
+            `Could not save photo for offline verification.\n\nError: ${photoError.message}\n\nYou can still login, but face verification may require internet connection.`,
+            [
+              {
+                text: 'Continue Anyway',
+                onPress: () => navigation.replace('Home', {user}),
+              },
+              {
+                text: 'Retry',
+                onPress: () => handleLogin(),
+              },
+            ]
+          );
         }
-        
-        setLoading(false);
-        navigation.replace('Home', {user});
       } else {
         Alert.alert('Error', 'Incorrect password');
         setLoading(false);

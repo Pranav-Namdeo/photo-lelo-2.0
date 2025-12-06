@@ -26,11 +26,24 @@ export default function FaceVerificationScreen({navigation}) {
 
   const loadSavedPhoto = async () => {
     try {
+      // First try to load from local storage
       const photoPath = await getSavedPhotoPath();
       if (photoPath) {
+        console.log('Loading photo from local storage:', photoPath);
         setSavedImage(`file://${photoPath}`);
       } else {
-        Alert.alert('Error', 'No saved photo found. Please login again.');
+        // If no local photo, try to load user data and show from server
+        console.log('No local photo found, trying to load from user data');
+        const {getUserData} = require('../utils/storage');
+        const userData = await getUserData();
+        if (userData && userData.filename) {
+          const {API_BASE_URL} = require('../config');
+          const serverPhotoUrl = `${API_BASE_URL}/Image%20save/${encodeURIComponent(userData.filename)}`;
+          console.log('Loading photo from server:', serverPhotoUrl);
+          setSavedImage(serverPhotoUrl);
+        } else {
+          Alert.alert('Error', 'No saved photo found. Please login again.');
+        }
       }
     } catch (error) {
       console.error('Error loading saved photo:', error);
@@ -99,14 +112,43 @@ export default function FaceVerificationScreen({navigation}) {
   };
 
   const handleVerify = async () => {
-    if (!capturedImage || !savedImage) {
-      Alert.alert('Error', 'Please capture a photo first');
+    console.log('Verify clicked - capturedImage:', capturedImage);
+    console.log('Verify clicked - savedImage:', savedImage);
+    
+    if (!capturedImage) {
+      Alert.alert('Error', 'Please capture your face first');
+      return;
+    }
+    
+    if (!savedImage) {
+      Alert.alert('Error', 'No reference photo available. Please login again.');
       return;
     }
 
     setLoading(true);
     try {
-      const savedPath = savedImage.replace('file://', '');
+      let savedPath = savedImage;
+      
+      // If it's a server URL, download it temporarily first
+      if (savedImage.startsWith('http')) {
+        Alert.alert('Info', 'Downloading reference photo for verification...');
+        const {downloadAndSavePhoto, getUserData} = require('../utils/storage');
+        const userData = await getUserData();
+        if (userData) {
+          try {
+            savedPath = await downloadAndSavePhoto(savedImage, userData.username);
+            console.log('Downloaded photo for verification:', savedPath);
+          } catch (downloadError) {
+            console.error('Failed to download photo:', downloadError);
+            Alert.alert('Error', 'Could not download reference photo. Please check your internet connection.');
+            setLoading(false);
+            return;
+          }
+        }
+      } else {
+        savedPath = savedImage.replace('file://', '');
+      }
+
       const result = await verifyFaceOffline(savedPath, capturedImage);
 
       setVerificationResult(result);
@@ -130,7 +172,7 @@ export default function FaceVerificationScreen({navigation}) {
       }
     } catch (error) {
       console.error('Error verifying face:', error);
-      Alert.alert('Error', 'Face verification failed');
+      Alert.alert('Error', 'Face verification failed: ' + error.message);
     } finally {
       setLoading(false);
     }
