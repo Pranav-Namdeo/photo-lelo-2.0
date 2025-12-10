@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useRef} from 'react';
 import {
   View,
   Text,
@@ -7,10 +7,9 @@ import {
   Image,
   Alert,
   ActivityIndicator,
-  PermissionsAndroid,
   Platform,
 } from 'react-native';
-import {launchCamera} from 'react-native-image-picker';
+import {Camera, useCameraDevice} from 'react-native-vision-camera';
 import {getSavedPhotoPath} from '../utils/storage';
 import {verifyFaceOffline} from '../utils/faceVerification';
 
@@ -19,10 +18,21 @@ export default function FaceVerificationScreen({navigation}) {
   const [savedImage, setSavedImage] = useState(null);
   const [loading, setLoading] = useState(false);
   const [verificationResult, setVerificationResult] = useState(null);
+  const [showCamera, setShowCamera] = useState(false);
+  const [hasPermission, setHasPermission] = useState(false);
+  
+  const camera = useRef(null);
+  const device = useCameraDevice('front');
 
   useEffect(() => {
     loadSavedPhoto();
+    checkCameraPermission();
   }, []);
+
+  const checkCameraPermission = async () => {
+    const permission = await Camera.requestCameraPermission();
+    setHasPermission(permission === 'granted');
+  };
 
   const loadSavedPhoto = async () => {
     try {
@@ -50,65 +60,42 @@ export default function FaceVerificationScreen({navigation}) {
     }
   };
 
-  const requestCameraPermission = async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.CAMERA,
-          {
-            title: 'Camera Permission',
-            message: 'Photo Lelo needs access to your camera for face verification',
-            buttonNeutral: 'Ask Me Later',
-            buttonNegative: 'Cancel',
-            buttonPositive: 'OK',
-          },
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      } catch (err) {
-        console.warn(err);
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const handleCapture = async () => {
-    try {
-      // Request camera permission first
-      const hasPermission = await requestCameraPermission();
-      if (!hasPermission) {
+  const handleOpenCamera = async () => {
+    if (!hasPermission) {
+      const permission = await Camera.requestCameraPermission();
+      if (permission !== 'granted') {
         Alert.alert(
           'Permission Denied',
           'Camera permission is required for face verification',
         );
         return;
       }
+      setHasPermission(true);
+    }
+    setShowCamera(true);
+  };
 
-      const result = await launchCamera({
-        mediaType: 'photo',
-        cameraType: 'front',
-        quality: 0.8,
-        saveToPhotos: false,
-      });
-
-      if (result.didCancel) {
-        return;
-      }
-
-      if (result.errorCode) {
-        Alert.alert('Error', result.errorMessage || 'Failed to capture photo');
-        return;
-      }
-
-      if (result.assets && result.assets[0]) {
-        const imageUri = result.assets[0].uri;
-        setCapturedImage(imageUri || null);
+  const handleTakePhoto = async () => {
+    try {
+      if (camera.current) {
+        const photo = await camera.current.takePhoto({
+          qualityPrioritization: 'balanced',
+          flash: 'off',
+        });
+        
+        console.log('Photo captured:', photo.path);
+        setCapturedImage(`file://${photo.path}`);
         setVerificationResult(null);
+        setShowCamera(false);
       }
     } catch (error) {
-      console.error('Error capturing photo:', error);
-      Alert.alert('Error', 'Failed to open camera');
+      console.error('Error taking photo:', error);
+      Alert.alert('Error', 'Failed to capture photo');
     }
+  };
+
+  const handleCloseCamera = () => {
+    setShowCamera(false);
   };
 
   const handleVerify = async () => {
@@ -178,6 +165,49 @@ export default function FaceVerificationScreen({navigation}) {
     }
   };
 
+  // Show camera view
+  if (showCamera) {
+    if (!device) {
+      return (
+        <View style={styles.container}>
+          <Text style={styles.errorText}>Camera not available</Text>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.cameraContainer}>
+        <Camera
+          ref={camera}
+          style={StyleSheet.absoluteFill}
+          device={device}
+          isActive={showCamera}
+          photo={true}
+        />
+        
+        <View style={styles.cameraOverlay}>
+          <View style={styles.cameraHeader}>
+            <TouchableOpacity
+              style={styles.closeButton}
+              onPress={handleCloseCamera}>
+              <Text style={styles.closeButtonText}>✕ Close</Text>
+            </TouchableOpacity>
+            <Text style={styles.cameraTitle}>Position your face in the frame</Text>
+          </View>
+
+          <View style={styles.cameraFooter}>
+            <TouchableOpacity
+              style={styles.captureButtonLarge}
+              onPress={handleTakePhoto}>
+              <View style={styles.captureButtonInner} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
+  // Show verification view
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -225,7 +255,7 @@ export default function FaceVerificationScreen({navigation}) {
       <View style={styles.buttonContainer}>
         <TouchableOpacity
           style={styles.captureButton}
-          onPress={handleCapture}
+          onPress={handleOpenCamera}
           disabled={loading}>
           <Text style={styles.buttonText}>📷 Capture Face</Text>
         </TouchableOpacity>
@@ -258,6 +288,67 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f5f5f5',
+  },
+  cameraContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  cameraOverlay: {
+    flex: 1,
+    justifyContent: 'space-between',
+  },
+  cameraHeader: {
+    paddingTop: 40,
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  closeButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginBottom: 10,
+  },
+  closeButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  cameraTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  cameraFooter: {
+    paddingBottom: 40,
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingVertical: 30,
+  },
+  captureButtonLarge: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 4,
+    borderColor: '#667eea',
+  },
+  captureButtonInner: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#667eea',
+  },
+  errorText: {
+    color: '#f00',
+    fontSize: 16,
+    textAlign: 'center',
+    marginTop: 50,
   },
   header: {
     backgroundColor: '#667eea',

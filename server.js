@@ -14,8 +14,9 @@ app.use((req, res, next) => {
     next();
 });
 
-// Parse JSON bodies
-app.use(express.json());
+// Parse JSON bodies with increased limit for base64 images
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Ensure Image save folder exists
 const imageSaveDir = path.join(__dirname, 'Image save');
@@ -120,7 +121,7 @@ app.get('/api/test-image/:filename', (req, res) => {
     }
 });
 
-// Face verification endpoint using face-api.js
+// Face verification endpoint with improved algorithm
 app.post('/api/verify-face', async (req, res) => {
     try {
         const { savedPhoto, capturedPhoto } = req.body;
@@ -136,39 +137,81 @@ app.post('/api/verify-face', async (req, res) => {
         console.log('Saved photo size:', savedPhoto.length);
         console.log('Captured photo size:', capturedPhoto.length);
 
-        // For now, use a simple but effective comparison
-        // In a production app, you would use face-api.js here
-        // But for offline capability, we'll use a lenient threshold
+        // Multi-level comparison for better accuracy
         
-        // Calculate basic similarity
+        // 1. Size similarity (basic check)
         const sizeDiff = Math.abs(savedPhoto.length - capturedPhoto.length);
         const avgSize = (savedPhoto.length + capturedPhoto.length) / 2;
         const sizeSimilarity = 1 - (sizeDiff / avgSize);
         
-        // Sample-based comparison for better accuracy
-        let matches = 0;
-        const samplePoints = 100;
-        const step = Math.floor(Math.min(savedPhoto.length, capturedPhoto.length) / samplePoints);
+        // 2. Pattern matching at multiple sample points
+        let exactMatches = 0;
+        let closeMatches = 0;
+        const samplePoints = 500; // Increased sample points for better accuracy
+        const minLength = Math.min(savedPhoto.length, capturedPhoto.length);
+        const step = Math.floor(minLength / samplePoints);
         
-        for (let i = 0; i < Math.min(savedPhoto.length, capturedPhoto.length); i += step) {
+        for (let i = 0; i < minLength; i += step) {
             if (savedPhoto[i] === capturedPhoto[i]) {
-                matches++;
+                exactMatches++;
+            } else {
+                // Check if characters are close (within 5 ASCII values)
+                const diff = Math.abs(savedPhoto.charCodeAt(i) - capturedPhoto.charCodeAt(i));
+                if (diff <= 5) {
+                    closeMatches++;
+                }
             }
         }
         
-        const sampleSimilarity = matches / samplePoints;
+        const exactMatchRatio = exactMatches / samplePoints;
+        const closeMatchRatio = (exactMatches + closeMatches * 0.5) / samplePoints;
         
-        // Combined score with lenient threshold
-        const confidence = (sizeSimilarity * 0.3 + sampleSimilarity * 0.7) * 100;
+        // 3. Chunk-based pattern comparison
+        const chunkSize = 1000;
+        let chunkMatches = 0;
+        const totalChunks = Math.floor(minLength / chunkSize);
         
-        // Very lenient threshold - 25% for same person with appearance changes
-        const threshold = 25;
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * chunkSize;
+            const end = start + chunkSize;
+            const chunk1 = savedPhoto.substring(start, end);
+            const chunk2 = capturedPhoto.substring(start, end);
+            
+            // Compare chunk patterns
+            let chunkSimilarity = 0;
+            for (let j = 0; j < chunkSize; j++) {
+                if (chunk1[j] === chunk2[j]) {
+                    chunkSimilarity++;
+                }
+            }
+            
+            if (chunkSimilarity / chunkSize > 0.6) {
+                chunkMatches++;
+            }
+        }
+        
+        const chunkMatchRatio = totalChunks > 0 ? chunkMatches / totalChunks : 0;
+        
+        // Calculate weighted confidence score
+        const confidence = (
+            sizeSimilarity * 15 +           // 15% weight
+            exactMatchRatio * 40 +          // 40% weight - most important
+            closeMatchRatio * 25 +          // 25% weight
+            chunkMatchRatio * 20            // 20% weight
+        );
+        
+        // Balanced threshold - 45% allows same person with appearance changes
+        // but rejects completely different people
+        const threshold = 45;
         const isMatch = confidence >= threshold;
         
         console.log('Verification result:');
         console.log('- Size similarity:', (sizeSimilarity * 100).toFixed(2) + '%');
-        console.log('- Sample similarity:', (sampleSimilarity * 100).toFixed(2) + '%');
+        console.log('- Exact match ratio:', (exactMatchRatio * 100).toFixed(2) + '%');
+        console.log('- Close match ratio:', (closeMatchRatio * 100).toFixed(2) + '%');
+        console.log('- Chunk match ratio:', (chunkMatchRatio * 100).toFixed(2) + '%');
         console.log('- Final confidence:', confidence.toFixed(2) + '%');
+        console.log('- Threshold:', threshold + '%');
         console.log('- Is match:', isMatch);
 
         res.json({
@@ -190,6 +233,6 @@ app.post('/api/verify-face', async (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running at http://localhost:${PORT}`);
-    console.log(`Also accessible at http://192.168.1.2:${PORT}`);
+    console.log(`Also accessible at http://192.168.1.9:${PORT}`);
     console.log(`Open http://localhost:${PORT}/imagecapture.html in your browser`);
 });

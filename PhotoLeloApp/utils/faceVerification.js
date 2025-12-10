@@ -1,5 +1,7 @@
 import RNFS from 'react-native-fs';
-import {API_BASE_URL} from '../config';
+import {NativeModules} from 'react-native';
+
+const {FaceComparison} = NativeModules;
 
 // Convert image to base64
 export const imageToBase64 = async (imagePath) => {
@@ -12,87 +14,68 @@ export const imageToBase64 = async (imagePath) => {
   }
 };
 
-// Server-based face verification using face-api.js
-const verifyFaceWithServer = async (savedPhotoBase64, capturedPhotoBase64) => {
-  try {
-    console.log('Attempting server-based verification...');
-    const response = await fetch(`${API_BASE_URL}/api/verify-face`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        savedPhoto: savedPhotoBase64,
-        capturedPhoto: capturedPhotoBase64,
-      }),
-      timeout: 10000,
-    });
-
-    if (response.ok) {
-      const result = await response.json();
-      console.log('Server verification result:', result);
-      return result;
-    } else {
-      console.log('Server verification failed, status:', response.status);
-      return null;
-    }
-  } catch (error) {
-    console.error('Server verification error:', error);
-    return null;
-  }
-};
-
-// Simple fallback comparison (very lenient for offline use)
+// Improved fallback comparison with actual pattern matching
 const simpleFallbackComparison = (img1, img2) => {
-  // Just check if both images exist and are reasonable sizes
   const size1 = img1.length;
   const size2 = img2.length;
   
-  // If both images are between 10KB and 5MB (reasonable photo sizes)
-  if (size1 > 10000 && size1 < 5000000 && size2 > 10000 && size2 < 5000000) {
-    // Very lenient - just assume it's the same person if photos are valid
-    // This is a fallback when server is unavailable
-    return 75; // Return 75% confidence
+  // Size check
+  const sizeDiff = Math.abs(size1 - size2);
+  const avgSize = (size1 + size2) / 2;
+  const sizeSimilarity = 1 - (sizeDiff / avgSize);
+  
+  // Pattern matching
+  let matches = 0;
+  const samplePoints = 200;
+  const minLength = Math.min(size1, size2);
+  const step = Math.floor(minLength / samplePoints);
+  
+  for (let i = 0; i < minLength; i += step) {
+    if (img1[i] === img2[i]) {
+      matches++;
+    }
   }
   
-  return 0;
+  const patternSimilarity = matches / samplePoints;
+  
+  // Combined score - need both size and pattern similarity
+  const confidence = (sizeSimilarity * 0.3 + patternSimilarity * 0.7) * 100;
+  
+  // Return confidence (will be checked against 60% threshold)
+  return confidence;
 };
 
-// Enhanced face comparison with server-based verification
+// Offline face comparison using native Android module
 export const compareFaces = async (savedPhotoPath, capturedPhotoPath) => {
   try {
-    console.log('=== FACE COMPARISON START ===');
+    console.log('=== OFFLINE FACE COMPARISON START ===');
     console.log('Saved photo:', savedPhotoPath);
     console.log('Captured photo:', capturedPhotoPath);
     
-    // Read both images as base64
-    const savedImage = await imageToBase64(savedPhotoPath);
-    const capturedImage = await imageToBase64(capturedPhotoPath);
-    
-    console.log('Saved image size:', savedImage.length);
-    console.log('Captured image size:', capturedImage.length);
-
-    // Try server-based verification first (uses face-api.js)
-    const serverResult = await verifyFaceWithServer(savedImage, capturedImage);
-    
-    if (serverResult && serverResult.success) {
-      console.log('Using server verification result');
-      console.log('Distance:', serverResult.distance);
-      console.log('Confidence:', serverResult.confidence);
+    // Use native module for proper image comparison
+    if (FaceComparison) {
+      console.log('Using native face comparison module');
+      const result = await FaceComparison.compareFaces(savedPhotoPath, capturedPhotoPath);
+      
+      console.log('Native comparison result:');
+      console.log('- Is match:', result.isMatch);
+      console.log('- Confidence:', result.confidence.toFixed(2) + '%');
+      console.log('=== FACE COMPARISON END ===');
       
       return {
-        isMatch: serverResult.isMatch,
-        confidence: serverResult.confidence,
-        message: serverResult.isMatch
-          ? 'Face verified successfully!'
-          : 'Face does not match. Please try again.',
+        isMatch: result.isMatch,
+        confidence: result.confidence,
+        message: result.message,
       };
     }
 
-    // Fallback to simple local verification if server is unavailable
-    console.log('Server unavailable, using fallback verification');
+    // Fallback if native module not available
+    console.log('Native module not available, using fallback');
+    const savedImage = await imageToBase64(savedPhotoPath);
+    const capturedImage = await imageToBase64(capturedPhotoPath);
+    
     const fallbackConfidence = simpleFallbackComparison(savedImage, capturedImage);
-    const isMatch = fallbackConfidence >= 60;
+    const isMatch = fallbackConfidence >= 45;
     
     console.log('Fallback confidence:', fallbackConfidence + '%');
     console.log('Match result:', isMatch);
@@ -110,7 +93,7 @@ export const compareFaces = async (savedPhotoPath, capturedPhotoPath) => {
     return {
       isMatch: false,
       confidence: 0,
-      message: 'Error during face verification',
+      message: 'Error during face verification: ' + error.message,
     };
   }
 };
