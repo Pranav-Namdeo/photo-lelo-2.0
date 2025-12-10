@@ -1,21 +1,40 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
+const fs = require('fs').promises;
+const fsSync = require('fs');
+const compression = require('compression');
 
 const app = express();
 const PORT = 3000;
 
-// Enable CORS for mobile app
+// Enable compression for better performance
+app.use(compression());
+
+// Enable CORS for mobile app with optimized headers
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    res.header('Cache-Control', 'public, max-age=3600'); // Cache static resources
+    
+    if (req.method === 'OPTIONS') {
+        res.sendStatus(200);
+        return;
+    }
     next();
 });
 
-// Parse JSON bodies with increased limit for base64 images
-app.use(express.json({ limit: '50mb' }));
+// Optimized JSON parsing with streaming for large payloads
+app.use(express.json({ 
+    limit: '50mb',
+    verify: (req, res, buf) => {
+        // Add request size logging for monitoring
+        if (buf.length > 10 * 1024 * 1024) { // 10MB
+            console.log(`Large request: ${buf.length} bytes from ${req.ip}`);
+        }
+    }
+}));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Ensure Image save folder exists
@@ -68,27 +87,46 @@ app.get('/api/test', (req, res) => {
     });
 });
 
-// API endpoint to get all users
-app.get('/api/users', (req, res) => {
+// Cache for users data to avoid repeated file system reads
+let usersCache = null;
+let cacheTimestamp = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// API endpoint to get all users - optimized with caching
+app.get('/api/users', async (req, res) => {
     console.log('Users endpoint hit from:', req.ip);
+    
     try {
+        const now = Date.now();
+        
+        // Return cached data if still valid
+        if (usersCache && (now - cacheTimestamp) < CACHE_DURATION) {
+            return res.json(usersCache);
+        }
+        
+        // Check if directory exists
+        if (!fsSync.existsSync(imageSaveDir)) {
+            console.log('Image save directory does not exist');
+            return res.json([]);
+        }
+        
         // Read all files from Image save directory
-        const files = fs.readdirSync(imageSaveDir);
+        const files = await fs.readdir(imageSaveDir);
         
-        // Filter PNG and JPG files and create user objects
+        // Filter and map files efficiently
         const users = files
-            .filter(file => file.endsWith('.png') || file.endsWith('.jpg') || file.endsWith('.jpeg'))
-            .map(file => {
-                // Remove file extension to get username
-                const username = file.replace(/\.(png|jpg|jpeg)$/i, '');
-                return {
-                    username: username,
-                    filename: file,
-                    password: 'pranav' // Default password for all users
-                };
-            });
+            .filter(file => /\.(png|jpg|jpeg)$/i.test(file))
+            .map(file => ({
+                username: file.replace(/\.(png|jpg|jpeg)$/i, ''),
+                filename: file,
+                password: 'pranav' // Default password for all users
+            }));
         
-        console.log(`Returning ${users.length} users`);
+        // Update cache
+        usersCache = users;
+        cacheTimestamp = now;
+        
+        console.log(`Returning ${users.length} users (cached for ${CACHE_DURATION/1000}s)`);
         res.json(users);
     } catch (error) {
         console.error('Error reading users:', error);

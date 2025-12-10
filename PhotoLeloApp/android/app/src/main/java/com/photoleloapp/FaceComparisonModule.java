@@ -6,6 +6,7 @@ import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.media.ExifInterface;
 import android.util.Log;
+import android.util.LruCache;
 
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -23,25 +24,41 @@ import com.google.mlkit.vision.face.FaceDetectorOptions;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class FaceComparisonModule extends ReactContextBaseJavaModule {
     
     private static final String TAG = "FaceComparison";
+    private static final int MAX_IMAGE_SIZE = 1024; // Max dimension for processing
+    private static final int CACHE_SIZE = 10; // Cache for processed features
+    
     private FaceDetector detector;
+    private ExecutorService executorService;
+    private LruCache<String, double[]> featureCache;
     
     public FaceComparisonModule(ReactApplicationContext reactContext) {
         super(reactContext);
         
-        // Initialize ML Kit Face Detector with lenient settings for better detection
+        // Initialize optimized ML Kit Face Detector
         FaceDetectorOptions options = new FaceDetectorOptions.Builder()
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                 .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
-                .setMinFaceSize(0.1f) // Detect smaller faces (10% of image)
+                .setMinFaceSize(0.1f)
                 .setContourMode(FaceDetectorOptions.CONTOUR_MODE_NONE)
                 .build();
         
         detector = FaceDetection.getClient(options);
+        executorService = Executors.newSingleThreadExecutor();
+        
+        // Initialize feature cache
+        featureCache = new LruCache<String, double[]>(CACHE_SIZE) {
+            @Override
+            protected int sizeOf(String key, double[] features) {
+                return features.length * 8; // 8 bytes per double
+            }
+        };
     }
 
     @Override
@@ -256,10 +273,20 @@ public class FaceComparisonModule extends ReactContextBaseJavaModule {
                 return null;
             }
 
-            // Load bitmap with mutable config
+            // First, get image dimensions without loading full bitmap
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(filePath, bounds);
+            
+            // Calculate sample size for memory optimization
+            int sampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, MAX_IMAGE_SIZE);
+            
+            // Load optimized bitmap
             BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            options.inPreferredConfig = Bitmap.Config.RGB_565; // Use less memory
+            options.inSampleSize = sampleSize;
             options.inMutable = true;
+            
             Bitmap bitmap = BitmapFactory.decodeFile(filePath, options);
             
             if (bitmap == null) {
@@ -267,77 +294,220 @@ public class FaceComparisonModule extends ReactContextBaseJavaModule {
                 return null;
             }
 
-            // Check and fix orientation
-            try {
-                ExifInterface exif = new ExifInterface(filePath);
-                int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
-                
-                if (orientation != ExifInterface.ORIENTATION_NORMAL) {
-                    Matrix matrix = new Matrix();
-                    switch (orientation) {
-                        case ExifInterface.ORIENTATION_ROTATE_90:
-                            matrix.postRotate(90);
-                            break;
-                        case ExifInterface.ORIENTATION_ROTATE_180:
-                            matrix.postRotate(180);
-                            break;
-                        case ExifInterface.ORIENTATION_ROTATE_270:
-                            matrix.postRotate(270);
-                            break;
-                    }
-                    
-                    Bitmap rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
-                    if (rotated != bitmap) {
-                        bitmap.recycle();
-                    }
-                    return rotated;
-                }
-            } catch (IOException e) {
-                Log.w(TAG, "Failed to read EXIF data", e);
-            }
+            // Handle orientation efficiently
+            return handleOrientation(bitmap, filePath);
             
-            return bitmap;
+        } catch (OutOfMemoryError e) {
+            Log.e(TAG, "Out of memory loading bitmap: " + path, e);
+            System.gc(); // Suggest garbage collection
+            return null;
         } catch (Exception e) {
             Log.e(TAG, "Error loading bitmap", e);
             return null;
         }
     }
     
+    private int calculateSampleSize(int width, int height, int maxSize) {
+        int sampleSize = 1;
+        if (height > maxSize || width > maxSize) {
+            final int halfHeight = height / 2;
+            final int halfWidth = width / 2;
+            
+            while ((halfHeight / sampleSize) >= maxSize && (halfWidth / sampleSize) >= maxSize) {
+                sampleSize *= 2;
+            }
+        }
+        return sampleSize;
+    }
+    
+    private Bitmap handleOrientation(Bitmap bitmap, String filePath) {
+        try {
+            ExifInterface exif = new ExifInterface(filePath);
+            int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+            
+            if (orientation == ExifInterface.ORIENTATION_NORMAL) {
+                return bitmap;
+            }
+            
+            Matrix matrix = new Matrix();
+            switch (orientation) {
+                case ExifInterface.ORIENTATION_ROTATE_90:
+                    matrix.postRotate(90);
+                    break;
+                case ExifInterface.ORIENTATION_ROTATE_180:
+                    matrix.postRotate(180);
+                    break;
+                case ExifInterface.ORIENTATION_ROTATE_270:
+                    matrix.postRotate(270);
+                    break;
+                default:
+                    return bitmap;
+            }
+            
+            Bitmap rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+            if (rotated != bitmap) {
+                bitmap.recycle();
+            }
+            return rotated;
+            
+        } catch (IOException e) {
+            Log.w(TAG, "Failed to read EXIF data", e);
+            return bitmap;
+        }
+    }
+    
     private double[] extractFaceFeatures(Bitmap faceBitmap) {
-        // Extract comprehensive features from FACE REGION ONLY
+        // Check cache first
+        String cacheKey = generateCacheKey(faceBitmap);
+        double[] cachedFeatures = featureCache.get(cacheKey);
+        if (cachedFeatures != null) {
+            Log.d(TAG, "Using cached features");
+            return cachedFeatures;
+        }
         
-        // 1. Skin tone features
-        double[] skinToneFeatures = extractSkinToneFeatures(faceBitmap);
+        // Extract optimized features from FACE REGION ONLY
+        double[] features = new double[64]; // Reduced feature vector size for performance
+        int index = 0;
         
-        // 2. Spatial color distribution
-        double[] spatialFeatures = extractSpatialColorFeatures(faceBitmap);
+        // 1. Optimized skin tone features (16 values)
+        double[] skinTone = extractOptimizedSkinTone(faceBitmap);
+        System.arraycopy(skinTone, 0, features, index, skinTone.length);
+        index += skinTone.length;
         
-        // 3. Color histogram
-        double[] colorFeatures = extractColorFeatures(faceBitmap);
+        // 2. Spatial color distribution (24 values - 3x3 grid)
+        double[] spatial = extractOptimizedSpatialFeatures(faceBitmap);
+        System.arraycopy(spatial, 0, features, index, spatial.length);
+        index += spatial.length;
         
-        // 4. Texture patterns
-        double[] textureFeatures = extractTextureFeatures(faceBitmap);
+        // 3. Color histogram (24 values - reduced bins)
+        double[] histogram = extractOptimizedHistogram(faceBitmap);
+        System.arraycopy(histogram, 0, features, index, histogram.length);
         
-        // 5. Edge structure
-        double[] edgeFeatures = extractEdgeFeatures(faceBitmap);
+        // Cache the features
+        featureCache.put(cacheKey, features);
         
-        // Combine all features
-        int totalLength = skinToneFeatures.length + spatialFeatures.length + 
-                         colorFeatures.length + textureFeatures.length + edgeFeatures.length;
-        double[] combined = new double[totalLength];
+        return features;
+    }
+    
+    private String generateCacheKey(Bitmap bitmap) {
+        // Simple hash based on bitmap properties
+        return String.valueOf(bitmap.getWidth() * bitmap.getHeight() * bitmap.getConfig().hashCode());
+    }
+    
+    private double[] extractOptimizedSkinTone(Bitmap bitmap) {
+        double[] features = new double[16];
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
         
-        int offset = 0;
-        System.arraycopy(skinToneFeatures, 0, combined, offset, skinToneFeatures.length);
-        offset += skinToneFeatures.length;
-        System.arraycopy(spatialFeatures, 0, combined, offset, spatialFeatures.length);
-        offset += spatialFeatures.length;
-        System.arraycopy(colorFeatures, 0, combined, offset, colorFeatures.length);
-        offset += colorFeatures.length;
-        System.arraycopy(textureFeatures, 0, combined, offset, textureFeatures.length);
-        offset += textureFeatures.length;
-        System.arraycopy(edgeFeatures, 0, combined, offset, edgeFeatures.length);
+        // Sample pixels efficiently (every 4th pixel)
+        int step = Math.max(1, Math.min(width, height) / 50);
         
-        return combined;
+        double sumR = 0, sumG = 0, sumB = 0;
+        double sumR2 = 0, sumG2 = 0, sumB2 = 0;
+        int count = 0;
+        
+        for (int y = 0; y < height; y += step) {
+            for (int x = 0; x < width; x += step) {
+                int pixel = bitmap.getPixel(x, y);
+                int r = (pixel >> 16) & 0xff;
+                int g = (pixel >> 8) & 0xff;
+                int b = pixel & 0xff;
+                
+                if (isSkinTone(r, g, b)) {
+                    sumR += r; sumG += g; sumB += b;
+                    sumR2 += r * r; sumG2 += g * g; sumB2 += b * b;
+                    count++;
+                }
+            }
+        }
+        
+        if (count > 0) {
+            double meanR = sumR / count, meanG = sumG / count, meanB = sumB / count;
+            features[0] = meanR / 255.0;
+            features[1] = meanG / 255.0;
+            features[2] = meanB / 255.0;
+            features[3] = Math.sqrt(sumR2 / count - meanR * meanR) / 255.0;
+            features[4] = Math.sqrt(sumG2 / count - meanG * meanG) / 255.0;
+            features[5] = Math.sqrt(sumB2 / count - meanB * meanB) / 255.0;
+            features[6] = (double) count / ((width / step) * (height / step));
+        }
+        
+        return features;
+    }
+    
+    private double[] extractOptimizedSpatialFeatures(Bitmap bitmap) {
+        double[] features = new double[27]; // 3x3 grid, RGB
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int gridSize = 3;
+        
+        int cellWidth = width / gridSize;
+        int cellHeight = height / gridSize;
+        
+        for (int gy = 0; gy < gridSize; gy++) {
+            for (int gx = 0; gx < gridSize; gx++) {
+                double sumR = 0, sumG = 0, sumB = 0;
+                int count = 0;
+                
+                int startX = gx * cellWidth;
+                int endX = Math.min((gx + 1) * cellWidth, width);
+                int startY = gy * cellHeight;
+                int endY = Math.min((gy + 1) * cellHeight, height);
+                
+                // Sample every 4th pixel for performance
+                for (int y = startY; y < endY; y += 4) {
+                    for (int x = startX; x < endX; x += 4) {
+                        int pixel = bitmap.getPixel(x, y);
+                        sumR += (pixel >> 16) & 0xff;
+                        sumG += (pixel >> 8) & 0xff;
+                        sumB += pixel & 0xff;
+                        count++;
+                    }
+                }
+                
+                int idx = (gy * gridSize + gx) * 3;
+                if (count > 0) {
+                    features[idx] = sumR / (count * 255.0);
+                    features[idx + 1] = sumG / (count * 255.0);
+                    features[idx + 2] = sumB / (count * 255.0);
+                }
+            }
+        }
+        
+        return features;
+    }
+    
+    private double[] extractOptimizedHistogram(Bitmap bitmap) {
+        double[] features = new double[24]; // 8 bins per channel
+        int[] histR = new int[8], histG = new int[8], histB = new int[8];
+        
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int totalPixels = 0;
+        
+        // Sample every 4th pixel for performance
+        for (int y = 0; y < height; y += 4) {
+            for (int x = 0; x < width; x += 4) {
+                int pixel = bitmap.getPixel(x, y);
+                int r = (pixel >> 16) & 0xff;
+                int g = (pixel >> 8) & 0xff;
+                int b = pixel & 0xff;
+                
+                histR[r / 32]++;
+                histG[g / 32]++;
+                histB[b / 32]++;
+                totalPixels++;
+            }
+        }
+        
+        // Normalize
+        for (int i = 0; i < 8; i++) {
+            features[i] = (double) histR[i] / totalPixels;
+            features[i + 8] = (double) histG[i] / totalPixels;
+            features[i + 16] = (double) histB[i] / totalPixels;
+        }
+        
+        return features;
     }
     
     private double[] extractSkinToneFeatures(Bitmap bitmap) {
@@ -532,11 +702,30 @@ public class FaceComparisonModule extends ReactContextBaseJavaModule {
     
     private double calculateEuclideanDistance(double[] features1, double[] features2) {
         double sum = 0;
-        for (int i = 0; i < features1.length; i++) {
+        int length = Math.min(features1.length, features2.length);
+        for (int i = 0; i < length; i++) {
             double diff = features1[i] - features2[i];
             sum += diff * diff;
         }
         return Math.sqrt(sum);
+    }
+    
+    @Override
+    public void onCatalystInstanceDestroy() {
+        super.onCatalystInstanceDestroy();
+        cleanup();
+    }
+    
+    private void cleanup() {
+        if (executorService != null && !executorService.isShutdown()) {
+            executorService.shutdown();
+        }
+        if (featureCache != null) {
+            featureCache.evictAll();
+        }
+        if (detector != null) {
+            detector.close();
+        }
     }
     
     private void performFallbackComparison(Bitmap bitmap1, Bitmap bitmap2, Promise promise) {

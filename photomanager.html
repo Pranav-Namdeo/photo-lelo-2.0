@@ -263,19 +263,40 @@
             document.getElementById('password').value = '';
         }
 
-        // Load users from server
-        async function loadUsers() {
+        // Cache for users data
+        let usersCache = null;
+        let cacheTimestamp = 0;
+        const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
+
+        // Load users from server with caching
+        async function loadUsers(forceRefresh = false) {
             try {
+                const now = Date.now();
+                
+                // Return cached data if still valid and not forcing refresh
+                if (!forceRefresh && usersCache && (now - cacheTimestamp) < CACHE_DURATION) {
+                    displayUsers(usersCache);
+                    return;
+                }
+                
                 const response = await fetch('/api/users');
                 const users = await response.json();
+                
+                // Update cache
+                usersCache = users;
+                cacheTimestamp = now;
                 
                 displayUsers(users);
             } catch (error) {
                 console.error('Error loading users:', error);
+                // Show cached data if available
+                if (usersCache) {
+                    displayUsers(usersCache);
+                }
             }
         }
 
-        // Display users in grid
+        // Display users in grid with optimized rendering
         function displayUsers(users) {
             const usersGrid = document.getElementById('usersGrid');
             const noUsers = document.getElementById('noUsers');
@@ -293,21 +314,30 @@
             document.getElementById('totalUsers').textContent = users.length;
             document.getElementById('totalPhotos').textContent = users.length;
             
-            // Clear existing cards
-            usersGrid.innerHTML = '';
+            // Use DocumentFragment for efficient DOM manipulation
+            const fragment = document.createDocumentFragment();
             
-            // Create user cards
+            // Create user cards efficiently
             users.forEach(user => {
                 const card = document.createElement('div');
                 card.className = 'user-card';
+                
+                // Optimize image loading with lazy loading
                 card.innerHTML = `
-                    <img src="/Image save/${user.filename}" alt="${user.username}">
+                    <img src="/Image save/${encodeURIComponent(user.filename)}" 
+                         alt="${user.username}" 
+                         loading="lazy"
+                         onerror="this.style.display='none'">
                     <div class="username">ID: ${user.username}</div>
                     <h3>Enrollment Number</h3>
                     <div class="password">Password: ${DEFAULT_USER_PASSWORD}</div>
                 `;
-                usersGrid.appendChild(card);
+                fragment.appendChild(card);
             });
+            
+            // Clear and append all at once for better performance
+            usersGrid.innerHTML = '';
+            usersGrid.appendChild(fragment);
         }
     </script>
 </body>

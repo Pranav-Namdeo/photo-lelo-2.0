@@ -3,10 +3,28 @@ import {NativeModules} from 'react-native';
 
 const {FaceComparison} = NativeModules;
 
-// Convert image to base64
+// Cache for base64 conversions to avoid repeated file reads
+const base64Cache = new Map();
+const CACHE_SIZE_LIMIT = 5; // Limit cache size to prevent memory issues
+
+// Convert image to base64 with caching
 export const imageToBase64 = async (imagePath) => {
   try {
+    // Check cache first
+    if (base64Cache.has(imagePath)) {
+      console.log('Using cached base64 for:', imagePath);
+      return base64Cache.get(imagePath);
+    }
+    
     const base64 = await RNFS.readFile(imagePath, 'base64');
+    
+    // Add to cache with size limit
+    if (base64Cache.size >= CACHE_SIZE_LIMIT) {
+      const firstKey = base64Cache.keys().next().value;
+      base64Cache.delete(firstKey);
+    }
+    base64Cache.set(imagePath, base64);
+    
     return base64;
   } catch (error) {
     console.error('Error converting image to base64:', error);
@@ -14,35 +32,45 @@ export const imageToBase64 = async (imagePath) => {
   }
 };
 
-// Improved fallback comparison with actual pattern matching
-const simpleFallbackComparison = (img1, img2) => {
+// Optimized fallback comparison with efficient pattern matching
+const optimizedFallbackComparison = (img1, img2) => {
   const size1 = img1.length;
   const size2 = img2.length;
   
-  // Size check
+  // Quick size check - if too different, likely different images
   const sizeDiff = Math.abs(size1 - size2);
   const avgSize = (size1 + size2) / 2;
   const sizeSimilarity = 1 - (sizeDiff / avgSize);
   
-  // Pattern matching
+  if (sizeSimilarity < 0.5) {
+    return sizeSimilarity * 100; // Early return for very different sizes
+  }
+  
+  // Optimized pattern matching with strategic sampling
   let matches = 0;
-  const samplePoints = 200;
+  const samplePoints = 100; // Reduced for performance
   const minLength = Math.min(size1, size2);
   const step = Math.floor(minLength / samplePoints);
   
-  for (let i = 0; i < minLength; i += step) {
+  // Sample at strategic points (beginning, middle, end)
+  const checkPoints = [
+    ...Array.from({length: samplePoints/3}, (_, i) => i * step),
+    ...Array.from({length: samplePoints/3}, (_, i) => Math.floor(minLength/2) + i * step),
+    ...Array.from({length: samplePoints/3}, (_, i) => minLength - (samplePoints/3 - i) * step)
+  ].filter(i => i < minLength);
+  
+  for (const i of checkPoints) {
     if (img1[i] === img2[i]) {
       matches++;
     }
   }
   
-  const patternSimilarity = matches / samplePoints;
+  const patternSimilarity = matches / checkPoints.length;
   
-  // Combined score - need both size and pattern similarity
-  const confidence = (sizeSimilarity * 0.3 + patternSimilarity * 0.7) * 100;
+  // Weighted combination favoring pattern over size
+  const confidence = (sizeSimilarity * 0.2 + patternSimilarity * 0.8) * 100;
   
-  // Return confidence (will be checked against 60% threshold)
-  return confidence;
+  return Math.min(confidence, 100);
 };
 
 // Offline face comparison using native Android module
@@ -74,7 +102,7 @@ export const compareFaces = async (savedPhotoPath, capturedPhotoPath) => {
     const savedImage = await imageToBase64(savedPhotoPath);
     const capturedImage = await imageToBase64(capturedPhotoPath);
     
-    const fallbackConfidence = simpleFallbackComparison(savedImage, capturedImage);
+    const fallbackConfidence = optimizedFallbackComparison(savedImage, capturedImage);
     const isMatch = fallbackConfidence >= 45;
     
     console.log('Fallback confidence:', fallbackConfidence + '%');

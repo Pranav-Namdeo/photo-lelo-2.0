@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useRef} from 'react';
+import React, {useState, useEffect, useRef, useCallback, useMemo} from 'react';
 import {
   View,
   Text,
@@ -7,7 +7,6 @@ import {
   Image,
   Alert,
   ActivityIndicator,
-  Platform,
 } from 'react-native';
 import {Camera, useCameraDevice} from 'react-native-vision-camera';
 import {getSavedPhotoPath} from '../utils/storage';
@@ -75,12 +74,13 @@ export default function FaceVerificationScreen({navigation}) {
     setShowCamera(true);
   };
 
-  const handleTakePhoto = async () => {
+  const handleTakePhoto = useCallback(async () => {
     try {
       if (camera.current) {
         const photo = await camera.current.takePhoto({
-          qualityPrioritization: 'balanced',
+          qualityPrioritization: 'speed', // Optimized for faster capture
           flash: 'off',
+          enableShutterSound: false, // Disable shutter sound for better UX
         });
         
         console.log('Photo captured:', photo.path);
@@ -92,13 +92,13 @@ export default function FaceVerificationScreen({navigation}) {
       console.error('Error taking photo:', error);
       Alert.alert('Error', 'Failed to capture photo');
     }
-  };
+  }, []);
 
   const handleCloseCamera = () => {
     setShowCamera(false);
   };
 
-  const handleVerify = async () => {
+  const handleVerify = useCallback(async () => {
     console.log('Verify clicked - capturedImage:', capturedImage);
     console.log('Verify clicked - savedImage:', savedImage);
     
@@ -113,6 +113,8 @@ export default function FaceVerificationScreen({navigation}) {
     }
 
     setLoading(true);
+    setVerificationResult(null); // Clear previous result
+    
     try {
       let savedPath = savedImage;
       
@@ -163,7 +165,7 @@ export default function FaceVerificationScreen({navigation}) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [capturedImage, savedImage]);
 
   // Show camera view
   if (showCamera) {

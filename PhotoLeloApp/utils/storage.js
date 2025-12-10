@@ -8,9 +8,22 @@ const STORAGE_KEYS = {
   PHOTO_PATH: 'photo_path',
 };
 
-// Generate hash for filename
+// Cache for frequently accessed data
+const cache = new Map();
+const CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutes
+
+// Generate hash for filename with caching
 export const generateHash = (username) => {
-  return CryptoJS.SHA256(username).toString();
+  const cacheKey = `hash_${username}`;
+  const cached = cache.get(cacheKey);
+  
+  if (cached && (Date.now() - cached.timestamp) < CACHE_EXPIRY) {
+    return cached.value;
+  }
+  
+  const hash = CryptoJS.SHA256(username).toString();
+  cache.set(cacheKey, { value: hash, timestamp: Date.now() });
+  return hash;
 };
 
 // Save user data after login
